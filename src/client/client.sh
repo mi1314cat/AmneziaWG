@@ -275,26 +275,38 @@ connect_flow() {
     iface_up && guard_rollback rollback_all
 }
 
+core_ensure() {
+    if [[ -x "$C_BIN" ]]; then
+        print_ok "内核已就绪: $(cat "$C_ROOT/bin/version" 2>/dev/null || echo 未知)"
+        return 0
+    fi
+    print_warn "未找到内核, 连接会失败。amneziawg-go 需要交叉编译(官方 release 仅源码)"
+    yes_no "现在编译安装?" y || { print_error "没有内核无法连接"; return 1; }
+    bash "$CLIENT_DIR/../conf/core.sh" install
+}
+
 client_menu() {
     while true; do
         print_title "AWG-Panel 客户端"
         conn_status
         echo
-        echo -e "${CYAN}1)${RESET} 连接隧道"
-        echo -e "${CYAN}2)${RESET} 断开隧道"
-        echo -e "${CYAN}3)${RESET} 启动 LAN 代理 (SOCKS5/HTTP)"
-        echo -e "${CYAN}4)${RESET} 停止 LAN 代理"
-        echo -e "${CYAN}5)${RESET} 允许 LAN 访问 (0.0.0.0)"
-        echo -e "${CYAN}6)${RESET} 查看连通性自检"
+        echo -e "${CYAN}1)${RESET} 安装 / 检查内核"
+        echo -e "${CYAN}2)${RESET} 连接隧道"
+        echo -e "${CYAN}3)${RESET} 断开隧道"
+        echo -e "${CYAN}4)${RESET} 启动 LAN 代理 (SOCKS5/HTTP)"
+        echo -e "${CYAN}5)${RESET} 停止 LAN 代理"
+        echo -e "${CYAN}6)${RESET} 允许 LAN 访问 (0.0.0.0)"
+        echo -e "${CYAN}7)${RESET} 查看连通性自检"
         echo -e "${CYAN}0)${RESET} 返回"
         read -r -p "请选择: " c || return 0
         case "$c" in
-            1) connect_flow ;;
-            2) iface_down ;;
-            3) proxy_start ;;
-            4) proxy_stop ;;
-            5) proxy_lan ;;
-            6) net_alive && print_ok "网络正常" || print_error "网络异常" ;;
+            1) core_ensure ;;
+            2) connect_flow ;;
+            3) iface_down ;;
+            4) proxy_start ;;
+            5) proxy_stop ;;
+            6) proxy_lan ;;
+            7) net_alive && print_ok "网络正常" || print_error "网络异常" ;;
             0) return ;;
             *) echo -e "${RED}无效选项 $c${RESET}" ;;
         esac

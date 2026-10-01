@@ -98,10 +98,15 @@ case "$MODE" in
         fetch_project
         if [[ "$MODE" == "client" ]]; then
             if [[ -f "$PROJECT_DIR/src/client/client.sh" ]]; then
+                # 客户端同样需要 amneziawg-go, 官方 release 只有源码, 必须编译
+                if [[ ! -x "$PROJECT_DIR/bin/amneziawg-go" ]]; then
+                    info "客户端需要 amneziawg-go 内核 (官方 release 仅源码包, 将本地编译)"
+                    bash "$PROJECT_DIR/src/conf/core.sh" install || die "内核安装失败"
+                fi
                 ok "以客户端模式启动"
-                exec bash "$PROJECT_DIR/src/client/client.sh"
+                exec bash "$PROJECT_DIR/src/client/client.sh" menu
             fi
-            warn "客户端面板尚未提供, 本次按服务端启动"
+            warn "客户端面板不存在, 本次按服务端启动"
         fi
         ok "安装完成, 进入面板"
         exec bash "$PANEL"
