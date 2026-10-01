@@ -47,11 +47,38 @@ _fetch_source() {   # $1=tag $2=目标目录
 }
 
 # ---------- 编译 ----------
+# 依赖镜像链: 官方 proxy.golang.org 在部分网络(如国内线路、部分路由/小主机)根本
+# 连不上, 表现是一堆 i/o timeout, 用户只能看到"所有编译方式均失败"。
+# 逐个尝试, 并允许用 AWG_GOPROXY 覆盖。
+_try_goproxy() {
+    local cands
+    if [[ -n "${AWG_GOPROXY:-}" ]]; then
+        cands="$AWG_GOPROXY"
+    else
+        cands="https://goproxy.cn,direct https://goproxy.io,direct https://proxy.golang.org,direct"
+    fi
+    local d="${1:-.}"
+    for g in $cands; do
+        print_info "  尝试依赖镜像: ${g%%,*}"
+        if ( cd "$d" && CGO_ENABLED=0 GOOS=linux GOARCH="${BUILD_ARCH:-amd64}" \
+             GOPROXY="$g" GOFLAGS=-mod=mod go mod download all ) >/dev/null 2>&1; then
+            echo "$g"; return 0
+        fi
+    done
+    return 1
+}
+
 _build_local() {   # $1=src $2=dest
     local src="$1" dest="$2"
+    # 依赖单独预取: 把"拉不到依赖"和"编译不过"分成两种可读的错误,
+    # 否则用户只会看到满屏 i/o timeout 再一句"所有编译方式均失败"。
+    local gp
+    gp=$(_try_goproxy "$src") || gp="direct"
+    print_info "  GOPROXY=$gp"
     ( cd "$src" && \
       CGO_ENABLED=0 GOOS=linux GOARCH="$BUILD_ARCH" GOMAXPROCS="$BUILD_PROCS" \
-      go build -trimpath -p "$BUILD_PROCS" -ldflags "-s -w" -o "$dest" . )
+      GOPROXY="$gp" GOFLAGS=-mod=mod \
+      go build -trimpath -p "$BUILD_PROCS" -ldflags "-s -w" -o "$dest" . ) 2>"$src/build.err"
 }
 
 _build_docker() {  # $1=src $2=dest
@@ -119,7 +146,16 @@ core_build() {     # $1=tag  $2=输出路径
     rm -rf "$work"
     # ok 是失败标志(0=成功)。注意用 `((ok)) &&` 而非 `||`:
     # `((0))` 的退出码是 1(假), 写成 `||` 会在成功时反而报错。
-    ((ok)) && { print_error "所有编译方式均失败"; print_info "可手动编译后覆盖 $dest"; }
+    if ((ok)); then
+        print_error "所有编译方式均失败"
+        local be; be=$(find "$work" -name build.err 2>/dev/null | head -1)
+        if [[ -n "$be" && -s "$be" ]]; then
+            print_info "最后一次编译错误 (末尾 8 行):"
+            tail -8 "$be" | sed 's/^/    /' >&2
+        fi
+        print_info "若是依赖下载超时: export AWG_GOPROXY=https://goproxy.cn,direct"
+        print_info "或设置 http_proxy/https_proxy 后重试; 也可手动编译后覆盖 $dest"
+    fi
     return $((ok))
 }
 
