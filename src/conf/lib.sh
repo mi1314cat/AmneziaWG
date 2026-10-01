@@ -16,6 +16,21 @@ AWG_KEYS_DIR="$AWG_ROOT/keys"
 AWG_LOGS_DIR="$AWG_ROOT/logs"
 AWG_STATE_DIR="$AWG_ROOT/state"
 AWG_NAT_MARK="awg-panel"      # NAT/防火墙规则统一标记, 清理时只认这个
+
+awg_proxy_apply() {   # lib.sh 自带一份: core.sh 等模块不经过 install.sh
+    [[ -n "${1:-}" ]] || return 0
+    export http_proxy="$1" https_proxy="$1" all_proxy="$1"
+    export no_proxy="127.0.0.1,localhost,::1${no_proxy:+,$no_proxy}"
+}
+
+# 下载通道: install.sh 选好的代理落在这里, 之后从面板里跑 core.sh
+# (编译内核要下 Go 工具链与模块) 也走同一条通道。
+# 不在这里读的话, 用户在安装时选了代理, 进面板后编译仍然直连失败。
+if [[ -z "${https_proxy:-}${http_proxy:-}" && -f "$AWG_STATE_DIR/proxy.env" ]]; then
+    # shellcheck disable=SC1091
+    . "$AWG_STATE_DIR/proxy.env"
+    [[ -n "${AWG_PROXY:-}" ]] && awg_proxy_apply "$AWG_PROXY"
+fi
 AWG_BACKUP_DIR="$AWG_ROOT/backup"
 
 AWG_IFACE="${AWG_IFACE:-awg0}"
