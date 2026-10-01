@@ -15,6 +15,7 @@ AWG_CLIENTS_DIR="$AWG_ROOT/clients"
 AWG_KEYS_DIR="$AWG_ROOT/keys"
 AWG_LOGS_DIR="$AWG_ROOT/logs"
 AWG_STATE_DIR="$AWG_ROOT/state"
+AWG_NAT_MARK="awg-panel"      # NAT/防火墙规则统一标记, 清理时只认这个
 AWG_BACKUP_DIR="$AWG_ROOT/backup"
 
 AWG_IFACE="${AWG_IFACE:-awg0}"
@@ -245,6 +246,41 @@ open_port() {      # $1=端口 $2=proto(udp|tcp|both)
 }
 
 # ==============================================================
+# ---------- NAT 清理 (唯一实现) ----------
+# 早期 apply.sh 的 nat_del 用 `${line%% *}` 取源地址, 实际取到的是 "-A";
+# 拼出来的删除命令是 `-D POSTROUTING -s -A ...`, 内核直接不认, 于是
+# 每次 `systemctl stop` 都留下一条 MASQUERADE 残留。uninstall.sh 当时用的是
+# 另一套正确写法 —— 两处各判各的, 这正是必须收敛成一份实现的原因。
+nat_cleanup() {   # 幂等; 无匹配则什么都不做
+    have iptables || return 0
+    local n=0 line
+    while read -r line; do
+        [[ -z "$line" ]] && continue
+        # `iptables -S` 的行形如: -A POSTROUTING -s 10.66.66.0/24 -o eth0 -m comment ...
+        # 去掉 "-A POSTROUTING " 前缀后整体回传给 -D, 规则必须逐字一致才能匹配
+        if iptables -t nat -D POSTROUTING ${line#-A POSTROUTING } 2>/dev/null; then
+            n=$((n + 1))
+        fi
+    done < <(iptables -t nat -S POSTROUTING 2>/dev/null | grep -F -- "comment $AWG_NAT_MARK")
+    [[ $n -gt 0 ]] && print_info "已清理 $n 条 NAT 规则"
+    return 0
+}
+
+# sysctl 原值记账: 开了 ip_forward 却不记原值, 卸载后机器上就留着一处改动
+sysctl_remember() {   # $1=key
+    local f="$AWG_STATE_DIR/sysctl.saved"
+    [[ -f "$f" ]] && return 0
+    sysctl -n "$1" 2>/dev/null | head -1 > "$f" || rm -f "$f"
+}
+
+sysctl_restore() {   # $1=key
+    local f="$AWG_STATE_DIR/sysctl.saved"
+    [[ -f "$f" ]] || return 0
+    local v; v=$(head -1 "$f" 2>/dev/null)
+    [[ -n "$v" ]] && sysctl -w "$1=$v" >/dev/null 2>&1
+    rm -f "$f"
+}
+
 # ---------- server.conf 定点修改 ----------
 # 只改 [Interface] 段内的键。server.conf 里 [Peer] 段同样有 PublicKey/AllowedIPs,
 # 分段写错会直接毁掉已建好的节点, 所以这里严格按段边界处理。

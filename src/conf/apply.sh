@@ -17,7 +17,7 @@ APPLY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$APPLY_DIR/lib.sh"
 
-NAT_MARK="awg-panel"
+NAT_MARK="$AWG_NAT_MARK"
 
 _srv_addr()   { grep -E '^Address\s*='     "$AWG_SERVER_CONF" 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ' ; }
 _srv_port()   { grep -E '^ListenPort\s*=' "$AWG_SERVER_CONF" 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ' ; }
@@ -32,20 +32,15 @@ nat_add() {
     [[ -z "$wan" ]] && { print_warn "无默认路由, 跳过 NAT"; return 0; }
     iptables -t nat -C POSTROUTING -s "$subnet" -o "$wan" -m comment --comment "$NAT_MARK" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s "$subnet" -o "$wan" -m comment --comment "$NAT_MARK" -j MASQUERADE
+    # 改 sysctl 前先记下原值, 否则卸载后机器上会留一处没人认领的改动
+    sysctl_remember net.ipv4.ip_forward
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
     print_info "NAT 已启用: $subnet -> $wan"
 }
 
-nat_del() {
-    have iptables || return 0
-    local line
-    while read -r line; do
-        [[ -z "$line" ]] && continue
-        iptables -t nat -D POSTROUTING -s "${line%% *}" -o "${line#*-o }" \
-            -m comment --comment "$NAT_MARK" -j MASQUERADE 2>/dev/null
-        iptables -t nat -D POSTROUTING -s "${line%% *}" -m comment --comment "$NAT_MARK" -j MASQUERADE 2>/dev/null
-    done < <(iptables -t nat -S POSTROUTING 2>/dev/null | grep -- "$NAT_MARK")
-}
+# 删除逻辑已收敛到 lib.sh 的 nat_cleanup() —— 原来的实现拼出来的命令是
+# `-D POSTROUTING -s -A ...`, 内核不认, 导致每次 stop 都留残留规则。
+nat_del() { nat_cleanup; }
 
 # ---------- up ----------
 apply_up() {
@@ -104,6 +99,7 @@ PY
 # ---------- down ----------
 apply_down() {
     nat_del
+    sysctl_restore net.ipv4.ip_forward
     ip link set "$AWG_IFACE" down 2>/dev/null
     print_info "接口已 down"
 }

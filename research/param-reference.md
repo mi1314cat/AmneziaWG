@@ -189,3 +189,45 @@ UAPI 下发失败 errno=-22
 - 预取依赖，镜像链 `goproxy.cn → goproxy.io → proxy.golang.org → direct`
 - `AWG_GOPROXY` 可覆盖
 - 失败时打印最后 8 行真实编译错误，而不是只给一句结论
+
+## 4.6 NAT 清理：解析 `iptables -S` 输出不能靠字符串切
+
+`apply.sh` 原来的 `nat_del`：
+
+```bash
+iptables -t nat -D POSTROUTING -s "${line%% *}" -o "${line#*-o }" ...
+```
+
+`iptables -t nat -S POSTROUTING` 的行长这样：
+
+```
+-A POSTROUTING -s 10.66.66.0/24 -o eth0 -m comment --comment awg-panel -j MASQUERADE
+```
+
+- `${line%% *}` 截到第一个空格，得到的是 **`-A`**，不是源地址；
+- `${line#*-o }` 把 `-o ` 后面**全部**内容都吃进去了（含 comment 和 `-j MASQUERADE`）。
+
+拼出来的是 `iptables -t nat -D POSTROUTING -s -A -o eth0 -m comment ...`，
+内核不认，**每次 `systemctl stop amneziawg` 都会留下一条 MASQUERADE 残留**。
+实测：连续 stop 多次后规则始终还在。
+
+正确做法是去掉 `-A POSTROUTING ` 前缀后整体回传给 `-D`（规则必须逐字一致才能匹配）：
+
+```bash
+iptables -t nat -D POSTROUTING ${line#-A POSTROUTING }
+```
+
+这条已经收敛到 `lib.sh` 的 `nat_cleanup()`，`apply.sh` 与 `uninstall.sh` 共用。
+**两处各写一套、各判各的，是最难查的一类问题**——当时 `uninstall.sh` 恰好写对了，
+所以"卸载能清干净、停止服务清不干净"这个不一致现象反而掩盖了 `nat_del` 的失效。
+
+## 4.7 改 sysctl 要记原值
+
+`nat_add` 里 `sysctl -w net.ipv4.ip_forward=1` 没有记账，卸载后机器上会留一处
+没人认领的改动。现已在开之前写入 `state/sysctl.saved`，`apply_down` 还原。
+
+> 顺带记一条同源教训（来自 CC 上 xray-browser-dialer 的实测记录）：
+> `net.ipv6.conf.all.forwarding=1` 与 `net.ipv6.conf.<if>.accept_ra=0` 同时存在时，
+> **一旦去改 forwarding，内核会删掉 RA 学来的默认路由**。
+> 本项目只碰 `net.ipv4.ip_forward`，全程不碰 IPv6 转发，故不受影响；
+> 但若将来加 IPv6 出网，这条必须先设 `accept_ra=2`。

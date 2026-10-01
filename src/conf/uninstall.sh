@@ -55,11 +55,14 @@ rm -f "/var/run/amneziawg/$U_IFACE.sock" "/var/run/amneziawg/$C_IFACE.sock"
 rmdir /var/run/amneziawg 2>/dev/null
 
 echo "--- 清理 NAT 规则 (仅 awg-panel 标记) ---"
-if command -v iptables >/dev/null 2>&1; then
+# shellcheck source=lib.sh
+if [[ -f "$U_ROOT/src/conf/lib.sh" ]]; then
+    . "$U_ROOT/src/conf/lib.sh" 2>/dev/null
+    nat_cleanup
+else
     while read -r line; do
         [[ "$line" == *awg-panel* ]] || continue
-        iptables -t nat -D POSTROUTING ${line#-A POSTROUTING } 2>/dev/null && \
-            echo "  removed: ${line:0:70}"
+        iptables -t nat -D POSTROUTING ${line#-A POSTROUTING } 2>/dev/null
     done < <(iptables -t nat -S POSTROUTING 2>/dev/null)
 fi
 
