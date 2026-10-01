@@ -75,6 +75,7 @@ deps_check() {
 # 本项目的差异: 除 127.0.0.1/localhost 外, 还探测**本机自己的 LAN IP**。
 # CC 上的 xray 绑在 192.168.1.178 而不是回环, 只扫回环会漏掉这个可用代理。
 AWG_PROXY_CANDS=()
+AWG_PROXY_CHOSEN=""
 
 _awg_lan_ips() {
     # 取默认路由所用网卡上的 IPv4; 拿不到就返回空
@@ -116,7 +117,7 @@ awg_proxy_apply() {   # $1 = 代理地址; 空 = 直连
 awg_proxy_pick() {
     if [[ -n "${https_proxy:-}${http_proxy:-}" ]]; then
         info "下载通道: 环境变量 ${https_proxy:-$http_proxy}"
-        awg_proxy_save "${https_proxy:-$http_proxy}"; return 0
+        AWG_PROXY_CHOSEN="${https_proxy:-$http_proxy}"; return 0
     fi
     awg_proxy_scan
     (( ${#AWG_PROXY_CANDS[@]} == 0 )) && return 0     # 没代理 -> 静默直连
@@ -132,9 +133,10 @@ awg_proxy_pick() {
     c="${c// /}"
     if [[ "$c" =~ ^[1-9][0-9]*$ ]] && (( c >= 1 && c <= ${#AWG_PROXY_CANDS[@]} )); then
         awg_proxy_apply "${AWG_PROXY_CANDS[$((c-1))]}"
-        awg_proxy_save "${AWG_PROXY_CANDS[$((c-1))]}"
+        AWG_PROXY_CHOSEN="${AWG_PROXY_CANDS[$((c-1))]}"
         ok "下载通道: ${AWG_PROXY_CANDS[$((c-1))]}"
     else
+        AWG_PROXY_CHOSEN=""
         ok "下载通道: 直连"
     fi
     return 0
@@ -142,10 +144,15 @@ awg_proxy_pick() {
 
 # 记到 state/proxy.env —— 之后从面板里跑 core.sh(编译内核)也走同一通道。
 # 否则用户在 install.sh 选了代理, 进面板后编译内核仍然直连失败。
-awg_proxy_save() {
+#
+# 注意调用时机: 必须在 fetch_project **之后**。fetch_project 在首次安装时
+# 会 `rm -rf "$PROJECT_DIR"`, 提前写进去的文件会被它连目录一起删掉。
+awg_proxy_persist() {
+    [[ -z "$AWG_PROXY_CHOSEN" ]] && return 0
     local f="$SRV_ROOT/amneziawg/state/proxy.env"
     mkdir -p "$(dirname "$f")" 2>/dev/null
-    printf 'AWG_PROXY=%q\n' "$1" > "$f"
+    printf 'AWG_PROXY=%q\n' "$AWG_PROXY_CHOSEN" > "$f"
+    return 0
 }
 
 fetch_project() {
@@ -189,8 +196,9 @@ case "$MODE" in
         ;;
     server|client)
         deps_check
-        awg_proxy_pick        # 必须在 fetch_project 之前, 否则下载就已经超时了
+        awg_proxy_pick          # apply 必须在 fetch 之前, 否则下载就已经超时了
         fetch_project
+        awg_proxy_persist       # 落盘必须在 fetch 之后, 它会 rm -rf 整个项目目录
         if [[ "$MODE" == "client" ]]; then
             if [[ -f "$PROJECT_DIR/src/client/client.sh" ]]; then
                 # 客户端同样需要 amneziawg-go, 官方 release 只有源码, 必须编译

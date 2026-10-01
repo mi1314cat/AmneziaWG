@@ -17,11 +17,33 @@
 bash <(curl -Ls https://github.com/mi1314cat/AmneziaWG/raw/refs/heads/main/install.sh)
 ```
 
-执行后：取码 → 依赖自检 → 进入中文管理面板。也可显式：
+执行后：取码 → 依赖自检 → 下载通道选择 → 进入中文管理面板。也可显式：
 
 ```bash
 install.sh server|client|update|status
 ```
+
+### 本机代理已开、但 curl 到 GitHub 超时
+
+很多机器把代理只写在 `/etc/profile.d/` 里，而非登录 shell 不加载该文件
+（`ssh host 'cmd'`、面板内执行、定时任务），于是**本机明明开着代理，下载却走直连直到超时**。
+
+`install.sh` 会探测本机常见代理端口并列出可用的通道让你选（直接回车 = 直连）。
+探测范围除 `127.0.0.1` / `localhost` 外，**还包括本机自己的 LAN IP**——
+不少服务（如 Xray）默认绑在网卡地址上而不是回环，只扫回环会漏掉。
+
+选中的通道会写入 `state/proxy.env`，之后从面板里跑 `core.sh`（编译内核要下
+Go 工具链与模块）也走同一条通道。
+
+> **注意先有鸡先有蛋**：上面那条一键命令本身就要先 curl 到 GitHub 才拿得到 `install.sh`。
+> 如果本机直连不了 GitHub，先设好代理再执行：
+>
+> ```bash
+> export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890
+> bash <(curl -Ls https://github.com/mi1314cat/AmneziaWG/raw/refs/heads/main/install.sh)
+> ```
+>
+> 代理地址按你自己的实际端口替换（`curl --proxy http://<地址>:<端口> https://github.com` 可自测）。
 
 ## Server
 
