@@ -23,6 +23,45 @@ PARAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 sv() { grep -E "^$1\s*=" "$AWG_SERVER_CONF" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
 
+# HeaderProtectionKey 一旦下发就无法再用 UAPI 清除:
+#   * ipcSetDevice 先用 fromDevice() 把设备当前值预填一遍, 所以**不写这行 = 保持原值**
+#   * 写 64 个 0 会被 loadExactHex 拒掉 (errno=-22)
+# 唯一可靠办法是重启服务(amneziawg-go 无状态, 重启即空设备, 再由 ExecStartPost 重新下发)。
+_hp_active() {
+    python3 "$AWG_UAPI_PY" get "$AWG_IFACE" 2>/dev/null | grep -q '^header_protection_key='
+}
+
+# 关闭 HeaderProtection 后把内核真正清干净
+_ensure_hp_cleared() {
+    _hp_active || return 0
+    print_warn "UAPI 无法清除已下发的 HeaderProtectionKey (内核把'不写该行'当作保持原值), 需重启服务"
+    yes_no "现在重启 amneziawg 服务? 会短暂断流" y || { print_warn "未重启, 内核仍在使用旧的 HeaderProtectionKey"; return 1; }
+    systemctl restart "$AWG_UNIT" && sleep 2
+    if _hp_active; then
+        print_error "重启后 HeaderProtectionKey 仍存在, 请手动检查"
+        return 1
+    fi
+    print_ok "已清除, 内核不再使用 HeaderProtectionKey"
+    return 0
+}
+
+# 改完 server.conf 必须热加载, 否则运行中的内核还停在旧参数上:
+# 面板显示新值、UAPI 读回旧值, 用户会以为面板在骗人。
+_reload_if_running() {
+    local u="${AWG_UNIT:-amneziawg}"
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+        print_info "热加载内核配置 ..."
+        if bash "$PARAM_DIR/server.sh" reload >/dev/null 2>&1; then
+            print_ok "内核已应用新参数"
+        else
+            print_error "热加载失败, 运行中的参数未改变"
+            return 1
+        fi
+    else
+        print_info "服务未运行, 参数将在下次启动时生效"
+    fi
+}
+
 # ---------- 档位 ----------
 apply_preset() {   # $1=basic|enhanced|strict|random
     local preset="$1"
@@ -77,6 +116,8 @@ apply_preset() {   # $1=basic|enhanced|strict|random
         return 1
     fi
     print_ok "已写入档位: $preset"
+    _reload_if_running || return 1
+    _ensure_hp_cleared || true
     params_show
     return 0
 }
@@ -114,13 +155,14 @@ toggle_bool() {   # $1=Key
         conf_set "$k" "true"; print_ok "$k 已开启"
     fi
     validate_awg "$AWG_SERVER_CONF" >/dev/null || print_warn "当前参数组合未通过校验, 请检查"
+    _reload_if_running
 }
 
 set_cpa() {
     local v; v=$(safe_read "ContentPaddingAddition (留空=关闭, 支持 100 或 100-200)" "$(sv ContentPaddingAddition)")
     [[ -z "$v" ]] && { conf_del ContentPaddingAddition; print_ok "已关闭"; return; }
     conf_set ContentPaddingAddition "$v"
-    validate_awg "$AWG_SERVER_CONF" >/dev/null && print_ok "已写入" || print_error "校验失败"
+    if validate_awg "$AWG_SERVER_CONF" >/dev/null; then print_ok "已写入"; _reload_if_running; else print_error "校验失败"; fi
 }
 
 set_hpk() {
@@ -128,7 +170,9 @@ set_hpk() {
     if [[ -n "$cur" ]]; then
         yes_no "已启用, 确认关闭?" n || return
         conf_del HeaderProtectionKey
-        print_ok "HeaderProtectionKey 已关闭"
+        print_ok "HeaderProtectionKey 已从配置移除"
+        _reload_if_running
+        _ensure_hp_cleared
         return
     fi
     print_warn "启用后 S1-S4 必须全部 >= $AWG_HEADER_NONCE_MIN, 否则内核返回 errno=-22 且不提示原因"
@@ -136,6 +180,7 @@ set_hpk() {
     conf_set HeaderProtectionKey "$(head -c 32 /dev/urandom | base64 -w0)"
     if validate_awg "$AWG_SERVER_CONF" >/dev/null; then
         print_ok "HeaderProtectionKey 已启用"
+        _reload_if_running
     else
         print_error "校验未通过 (S1-S4 有小于 $AWG_HEADER_NONCE_MIN 的值), 请先调整"
     fi
@@ -146,15 +191,25 @@ params_show_advanced() {
     printf "  %-26s %s\n" "DisableCookies"          "$(sv DisableCookies || echo 'false (默认)')"
     printf "  %-26s %s\n" "ContentPaddingAddition"  "$(sv ContentPaddingAddition || echo '未设置')"
     local hp; hp=$(sv HeaderProtectionKey)
-    printf "  %-26s %s\n" "HeaderProtectionKey"     "${hp:0:12}${hp:+...}${hp:-未设置}"
+    if [[ -n "$hp" ]]; then
+        printf "  %-26s %s\n" "HeaderProtectionKey" "已启用 (${#hp} 字符, 首 8: ${hp:0:8}...)"
+    else
+        printf "  %-26s %s\n" "HeaderProtectionKey" "未设置"
+    fi
 }
+
+# printf 的 %-Ns 是按**字节**算宽度的, 中文字段名会让列错位,
+# 而且参数个数一旦超过格式槽位数就会换行继续打, 所以统一走 _row4。
+# 所以这里统一用纯 ASCII 键名 + 四列固定布局。
+_row4() { printf "  %-5s %-7s  %-5s %-7s  %-5s %-7s  %-5s %s\n" "$@"; }
 
 params_show() {
     print_title "当前 AWG 混淆参数"
-    printf "  %-4s %-8s %-8s %s\n" "Jc" "$(sv Jc)" "" ""
-    printf "  %-4s %-8s %-8s %s\n" "Jmin" "$(sv Jmin)" "Jmax" "$(sv Jmax)"
-    printf "  %-4s %-8s %-8s %-8s %s\n" "S1" "$(sv S1)" "S2" "$(sv S2)" "S3" "$(sv S3)" "S4" "$(sv S4)"
-    printf "  %-4s %-8s %-8s %-8s %s\n" "H1" "$(sv H1)" "H2" "$(sv H2)" "H3" "$(sv H3)" "H4" "$(sv H4)"
+    # 参数个数必须与格式槽位严格一致, 否则多出来的会换行继续打印
+    _row4 "Jc" "$(sv Jc)" "Jmin" "$(sv Jmin)" "Jmax" "$(sv Jmax)" "MTU" "$(sv MTU)"
+    _row4 "S1" "$(sv S1)" "S2" "$(sv S2)" "S3" "$(sv S3)" "S4" "$(sv S4)"
+    _row4 "H1" "$(sv H1)" "H2" "$(sv H2)" "H3" "$(sv H3)" "H4" "$(sv H4)"
+    echo
     params_show_advanced
     echo
     local peers; peers=$(grep -c '^\[Peer' "$AWG_SERVER_CONF" 2>/dev/null || echo 0)

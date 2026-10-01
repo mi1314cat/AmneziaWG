@@ -137,3 +137,55 @@ if !d.headerProtectionKey.IsZero() {
 - [ ] `client-NNN.conf` 中 AWG 参数的官方拼写
 - [ ] mihomo `version: 3` 与官方 v3.1 服务端在 `random-trailers` / `disable-cookies` 上的互通
 - [ ] 内核模块方案在标准 Debian / Ubuntu 上的可行性
+---
+
+## 4.3 UAPI「不写 = 保持」语义（实测，容易想当然）
+
+`device/uapi.go` 的处理流程是：
+
+```go
+ipcDev := new(ipcSetDevice)
+ipcDev.fromDevice(device)   // ← 先把设备当前值预填进请求结构
+```
+
+所以 **payload 里不写某个键 = 保持当前值**，不是「清空」。
+
+对 `HeaderProtectionKey` 这类"关掉就等于没有"的参数，后果是：
+面板已经把 `HeaderProtectionKey` 从 `server.conf` 删掉了、`render` 出来的 payload
+也确认没有这一行、内核返回成功，但 `get` 读回来**还在**。
+
+试过 `header_protection_key=`（空串）与 64 个 `0`，都被 `loadExactHex` 拒掉：
+
+```
+UAPI 下发失败 errno=-22
+```
+
+**结论：已下发的 HeaderProtectionKey 无法通过 UAPI 清除，唯一可靠办法是重启服务。**
+`amneziawg-go` 无状态，重启即空设备，再由 `ExecStartPost` 重新下发 `server.conf`。
+`params.sh` 的 `_ensure_hp_cleared()` 会在检测到残留时提示并询问是否重启。
+
+> 顺带说明 `mergeWithDevice` 里那句
+> `device.headerProtection.key = d.headerProtectionKey`
+> 看似"无条件赋值=会清零"，但因为 `fromDevice` 已经预填过，
+> 省略该行时 `d.headerProtectionKey` 装的是**旧值**，所以清不掉。
+
+## 4.4 常见 errno 与可操作提示
+
+| errno | 含义 | 面板提示 |
+|---|---|---|
+| `-22` EINVAL | 参数不被本版本接受 | 检查 J1/J2/J3/Itime 等 v1.5 专属参数（v3 已移除） |
+| `-71` EPROTO | 报文里有一行不是 `key=value` | 多半是把 `.conf` 原文当 payload 下发了；`uapi.py set` 现已自动识别并转换 |
+| `-1` | socket 层失败 | 服务没起或权限不足 |
+| `-13` | 数值超出内核允许范围 | |
+
+`uapi.py set` 现在会检测 INI 格式并自动 `render`，同时对上述 errno 给出可操作提示。
+
+## 4.5 依赖镜像（客户端编译的实际障碍）
+
+客户端装内核同样要 `go mod download`。`proxy.golang.org` 在部分网络根本连不上，
+表现是满屏 `i/o timeout` 加一句"所有编译方式均失败"，用户无从判断是网络还是代码问题。
+
+`core.sh` 现在：
+- 预取依赖，镜像链 `goproxy.cn → goproxy.io → proxy.golang.org → direct`
+- `AWG_GOPROXY` 可覆盖
+- 失败时打印最后 8 行真实编译错误，而不是只给一句结论

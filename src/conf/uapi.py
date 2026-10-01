@@ -23,6 +23,8 @@ import binascii
 import configparser
 import os
 import socket
+import tempfile
+import re
 import sys
 
 SOCKDIR = "/var/run/amneziawg"
@@ -346,9 +348,34 @@ def main(argv):
             return 0
         if cmd == "set" and len(argv) == 4:
             conf = sys.stdin.read() if argv[3] == "-" else open(argv[3], encoding="utf-8").read()
+            # 直接传 .conf 是很自然的想法, 但 UAPI 只认 key=value,
+            # 遇到 [Interface] 这类小节头会报 errno=-71 "failed to parse line"
+            # 且不给原因。这里自动识别并转换, 省得用户对着裸 errno 发呆。
+            if re.search(r"^\s*\[(Interface|Peer)\]", conf, re.M):
+                sys.stderr.write("[Info] 检测到 INI 格式, 已自动渲染为 UAPI payload\n")
+                # render() 收的是**路径**, 这里先落临时文件再转换
+                tf = tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False,
+                                                encoding="utf-8")
+                try:
+                    tf.write(conf)
+                    tf.close()
+                    conf = render(tf.name) if "[Interface]" in conf else render_client(tf.name)
+                finally:
+                    os.unlink(tf.name)
             code, msg = parse_errno(uapi_call(argv[2], "set", conf))
             if code != 0:
+                hint = {
+                    -22: "参数不被本版本接受(检查 J1/J2/J3/Itime 这类 v1.5 专属参数, "
+                         "v3 会直接拒绝)",
+                    -71: "UAPI 报文里有一行不是 key=value。确认传的是渲染后的 payload "
+                         "而不是 .conf 原文",
+                    -1:  "socket 层失败, 通常是服务没起或权限不足",
+                    -4:  "内核返回了内存不足",
+                    -13: "参数值超出内核允许的范围",
+                }.get(code, "")
                 sys.stderr.write(f"UAPI 下发失败 errno={code}: {msg or '(内核未给出原因)'}\n")
+                if hint:
+                    sys.stderr.write(f"  提示: {hint}\n")
                 return 1
             print(f"UAPI 已应用 -> {argv[2]}")
             return 0
