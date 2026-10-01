@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # AWG-Panel — AmneziaWG Server / Client 面板
 
 个人 AmneziaWG 核心管理面板：**服务端节点管理 + 客户端配置生成 + LAN 代理**。
@@ -78,6 +77,3 @@ CC (mihomo v1.19.30) ──AWG UDP/41871──> RN (amneziawg-go v3.1.20260828) 
 
 踩坑记录见 [`research/param-reference.md`](research/param-reference.md)，
 架构设计见 [`design/architecture-design.md`](design/architecture-design.md)。
-=======
-# AmneziaWG
->>>>>>> 4564b233c3daad2c3059d0ef350aa24b89b225dd
