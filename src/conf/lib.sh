@@ -245,6 +245,29 @@ open_port() {      # $1=端口 $2=proto(udp|tcp|both)
 }
 
 # ==============================================================
+# ---------- server.conf 定点修改 ----------
+# 只改 [Interface] 段内的键。server.conf 里 [Peer] 段同样有 PublicKey/AllowedIPs,
+# 分段写错会直接毁掉已建好的节点, 所以这里严格按段边界处理。
+conf_set() {   # $1=Key $2=Value
+    local key="$1" val="$2" f="$AWG_SERVER_CONF"
+    [[ -f "$f" ]] || { print_error "缺少 $f"; return 1; }
+    local tmp; tmp=$(mktemp)
+    awk -v k="$key" -v v="$val" '
+        /^\[/ { inif = ($0 ~ /^\[Interface\]/); print; next }
+        inif && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { print k " = " v; hit=1; next }
+        { print }
+    ' "$f" > "$tmp"
+    # 该键原本不存在 -> 插到第一个 [Peer] 之前(即 [Interface] 末尾)
+    if ! grep -qE "^[[:space:]]*$key[[:space:]]*=" "$tmp"; then
+        awk -v k="$key" -v v="$val" '
+            /^\[Peer/ && !done { print k " = " v; done=1 }
+            { print }' "$tmp" > "$tmp.2" && mv "$tmp.2" "$tmp"
+    fi
+    mv "$tmp" "$f"
+}
+
+conf_del() { sed -i "/^[[:space:]]*$1[[:space:]]*=/d" "$AWG_SERVER_CONF"; }
+
 # 密钥 (base64 面向 .conf / mihomo; UAPI 内部由 uapi.py 转 hex)
 # ==============================================================
 gen_keypair() {    # stdout: "<priv_b64> <pub_b64>"

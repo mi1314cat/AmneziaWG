@@ -54,12 +54,14 @@ CATART
 ${GREEN}AWG-Panel — AmneziaWG 管理脚本${RESET}   ${GREEN}[ 服务端 · SERVER ]${RESET}
 ----------------------
 ${GREEN}1.${RESET} 安装 / 内核 (初始化/安装/更新/版本/卸载)
-${GREEN}2.${RESET} 服务端配置 (参数/子网/端口/混淆档位)
+${GREEN}2.${RESET} 服务端配置 (端口/子网/DNS/MTU/NAT)
 ${GREEN}3.${RESET} 客户端节点 (创建/列表/删除/重新生成)
 ${GREEN}4.${RESET} 客户端产物 (原生 conf · mihomo YAML · 二维码)
 ${GREEN}5.${RESET} 服务管理 (安装/启动/停止/重启/重载/日志)
 ${GREEN}6.${RESET} 查看状态 (配置摘要 + UAPI 实时统计)
-${GREEN}7.${RESET} 防火墙 (查看已放行端口)
+${GREEN}7.${RESET} 混淆参数 (档位/高级参数)
+${GREEN}8.${RESET} 防火墙 (查看已放行端口)
+${GREEN}9.${RESET} 卸载面板
 ${GREEN}0.${RESET} 退出
 ----------------------"
     status_line
@@ -72,7 +74,9 @@ ${GREEN}0.${RESET} 退出
         4) artifact_menu ;;
         5) service_menu ;;
         6) run_module server.sh show ;;
-        7) fw_menu ;;
+        7) run_module params.sh menu ;;
+        8) fw_menu ;;
+        9) run_module uninstall.sh "${2:-}" ;;
         0) clear; exit 0 ;;
         *)  echo -e "${RED}无效选项 $choice${RESET}" ;;
     esac

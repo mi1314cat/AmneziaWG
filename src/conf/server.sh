@@ -21,6 +21,78 @@ SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------- 读值 ----------
 sv_get() { grep -E "^$1\s*=" "$AWG_SERVER_CONF" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
 
+# ---------- 修改类操作: 统一走"备份 -> 改 -> 校验 -> 应用 -> 失败回滚" ----------
+server_mutate() {   # $1=说明  后续为修改动作
+    local desc="$1"; shift
+    local bak; bak=$(state_backup "$desc")
+    if ! validate_awg "$AWG_SERVER_CONF" >/dev/null; then
+        print_error "修改后校验未通过, 已回滚"
+        cp -f "$bak/server.conf" "$AWG_SERVER_CONF"
+        return 1
+    fi
+    if have_svc && systemctl is-active --quiet "$AWG_UNIT"; then
+        if ! server_reload >/dev/null; then
+            print_error "热加载失败, 已回滚"
+            cp -f "$bak/server.conf" "$AWG_SERVER_CONF"
+            server_reload >/dev/null 2>&1
+            return 1
+        fi
+    fi
+    print_ok "$desc 已生效"
+    return 0
+}
+
+server_set_port() {
+    print_title "修改监听端口"
+    local old cur
+    old=$(sv_get ListenPort); old=${old:-未设置}
+    printf "  %-14s %s\n" "当前端口" "$old" >&2
+    local p; p=$(safe_read_port "$(sv_get ListenPort)" "udp")
+    conf_set ListenPort "$p"
+    open_port "$p" "udp"
+    server_mutate "监听端口 -> $p"
+}
+
+server_set_subnet() {
+    print_title "修改服务端子网"
+    local old cur
+    old=$(sv_get Address); old=${old:-未设置}
+    printf "  %-14s %s\n" "当前地址" "$old" >&2
+    print_warn "已有节点的客户端地址都在这个网段内, 改网段后所有客户端配置都会失效"
+    yes_no "确认修改" n || return 0
+    local a; a=$(safe_read "新的服务端地址 (IP/掩码)" "$old")
+    [[ "$a" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || { print_error "格式应为 IP/掩码"; return 1; }
+    conf_set Address "$a"
+    if have_svc && systemctl is-active --quiet "$AWG_UNIT"; then
+        ip addr replace "$a" dev "$AWG_IFACE" 2>/dev/null
+    fi
+    server_mutate "服务端地址 -> $a"
+}
+
+server_set_dns() {
+    local d; d=$(safe_read "下发给客户端的 DNS" "$(sv_get DNS)")
+    conf_set DNS "$d"
+    server_mutate "客户端 DNS -> $d"
+}
+
+server_set_mtu() {
+    local m; m=$(safe_read "MTU" "$(sv_get MTU)")
+    [[ "$m" =~ ^[0-9]+$ ]] || { print_error "MTU 必须是数字"; return 1; }
+    conf_set MTU "$m"
+    server_mutate "MTU -> $m"
+}
+
+server_toggle_nat() {
+    if [[ "$(sv_get Masquerade)" == "true" ]]; then
+        conf_set Masquerade "false"
+        have_svc && systemctl is-active --quiet "$AWG_UNIT" && bash "$SERVER_DIR/apply.sh" down >/dev/null 2>&1
+        server_mutate "NAT 已关闭"
+    else
+        conf_set Masquerade "true"
+        server_mutate "NAT 已开启"
+    fi
+}
+
 # ---------- init ----------
 server_init() {
     print_title "创建 AmneziaWG 服务端配置"
@@ -147,22 +219,59 @@ server_reload() {
 # ---------- menu ----------
 server_menu() {
     while true; do
-        print_title "AmneziaWG 服务端"
-        echo "1) 查看配置"
-        echo "2) 初始化配置"
-        echo "3) 重载配置"
-        echo "0) 返回"
-        printf "选择: " >&2
-        read -r c || exit 0
+        print_title "AmneziaWG 服务端配置"
+        if [[ -f "$AWG_SERVER_CONF" ]]; then
+            printf "  %-12s %s   %s\n" "地址"   "$(sv_get Address)" "端口 $(sv_get ListenPort)"
+            printf "  %-12s %s   %s\n" "混淆"   "Jc=$(sv_get Jc) S2=$(sv_get S2)" "NAT=$(sv_get Masquerade)"
+        else
+            print_warn "尚未初始化"
+        fi
+        echo
+        echo -e "${CYAN}1)${RESET} 查看完整配置 / 运行状态"
+        echo -e "${CYAN}2)${RESET} 初始化配置 (首次)"
+        echo -e "${CYAN}3)${RESET} 修改监听端口 (冲突自动检测)"
+        echo -e "${CYAN}4)${RESET} 修改服务端子网"
+        echo -e "${CYAN}5)${RESET} 修改 DNS / MTU / NAT"
+        echo -e "${CYAN}6)${RESET} 混淆参数档位与高级参数"
+        echo -e "${CYAN}7)${RESET} 重载配置"
+        echo -e "${CYAN}0)${RESET} 返回"
+        read -r -p "请选择: " c || return 0
         c=$(clean_input "$c")
         case "$c" in
             1) server_show ;;
             2) server_init ;;
-            3) server_reload ;;
+            3) server_set_port ;;
+            4) server_set_subnet ;;
+            5) server_misc_menu ;;
+            6) bash "$SERVER_DIR/params.sh" menu ;;
+            7) server_reload ;;
             0) return ;;
             *) print_error "无效选项" ;;
         esac
-        printf "回车继续..." >&2; read -r || exit 0
+        read -r -p "按回车继续..." _ || return 0
+    done
+}
+
+server_misc_menu() {
+    while true; do
+        print_title "DNS / MTU / NAT"
+        echo -e "${CYAN}DNS:${RESET} $(sv_get DNS)"
+        echo -e "${CYAN}MTU:${RESET} $(sv_get MTU)"
+        echo -e "${CYAN}NAT:${RESET} $(sv_get Masquerade)"
+        echo
+        echo -e "${CYAN}1)${RESET} 修改 DNS"
+        echo -e "${CYAN}2)${RESET} 修改 MTU"
+        echo -e "${CYAN}3)${RESET} 切换 NAT (客户端经本机出网)"
+        echo -e "${CYAN}0)${RESET} 返回"
+        read -r -p "请选择: " c || return 0
+        case "$c" in
+            1) server_set_dns ;;
+            2) server_set_mtu ;;
+            3) server_toggle_nat ;;
+            0) return ;;
+            *) print_error "无效选项" ;;
+        esac
+        read -r -p "按回车继续..." _ || return 0
     done
 }
 
