@@ -63,6 +63,26 @@ bash src/conf/service.sh install|start|stop|restart|reload|status|logs [n]
 | `<name>.mihomo.yaml` | mihomo `proxies` 片段（已在 v1.19.30 上 `mihomo -t` 校验通过） |
 | `<name>.png` | 二维码，内容为 `.conf` 全文 |
 
+## 配置下发（服务端 → 客户端）
+
+客户端原本只能手动把 `.conf` 放过去。现在服务端可生成一次性下发链接，
+客户端一条命令拉回并落盘：
+
+```bash
+# 服务端: 主面板 8) 配置下发  →  1) 生成下发链接
+#   默认限次 1 次、24 小时有效
+# 客户端:
+bash src/client/client.sh pull http://<服务端IP>:9393/share/<token>
+```
+
+服务端跑 `share_server.py`（双栈监听，IPv4/IPv6 客户端都能连），token 为
+128-bit 随机数，支持限次 / 有效期 / 手动禁用，多客户端同时拉用 `flock` 串行化计数。
+主服务未运行或配置不可用时返回 503 且**不**消耗额度。
+
+> ⚠️ **该 `.conf` 内含节点私钥**，会在网络上走一遍。默认「限次 1 + 24 小时」，
+> 拉一次即作废，用来把暴露窗口压到最小；请勿公开转发。
+> 私钥绝不出机器的做法是客户端本地生成密钥、只把公钥注册到服务端，本项目未实现。
+
 ## Client
 
 ```bash

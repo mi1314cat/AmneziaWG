@@ -293,6 +293,65 @@ client_banner() {
     echo "----------------------" >&2
 }
 
+# ---------- 从服务端拉取配置 ----------
+# 服务端跑 share_server.py, 客户端凭一次性 token 取回 client.conf。
+# 拉之前先验 URL 形态再落盘: 直接 curl | tee 到目标路径的话,
+# 服务端返回 404/410 时会把 "not found" 之类的正文写进 client.conf,
+# 之后连接时报的是看不懂的解析错误。
+client_pull() {   # $1=下发链接; $2=节点名(用于文件名, 可选)
+    local url="${1:-}"
+    [[ -n "$url" ]] || { print_error "用法: client.sh pull <下发链接>"; return 1; }
+    [[ "$url" =~ ^https?:// ]] || { print_error "链接格式不对, 应以 http:// 或 https:// 开头"; return 1; }
+
+    mkdir -p "$C_CLIENT_DIR"
+    local tmp="$C_CLIENT_DIR/.pull.tmp"
+    # 不能用 curl -f: 它在 HTTP >= 400 时退出码非 0, 于是 410(额度用尽) 和
+    # 连不上网络会走进同一个分支, 用户只能看到"连不上", 永远不知道链接其实
+    # 已经作废了。这里不加 -f, 拿状态码自己分流。
+    local code
+    code=$(curl -sS --max-time 30 -o "$tmp" -w '%{http_code}' "$url" 2>/dev/null)
+    case "$code" in
+        2*) ;;
+        000) rm -f "$tmp"; print_error "连不上 $url (超时或无路由)"; return 1 ;;
+        404) rm -f "$tmp"; print_error "链接不存在 (404): token 被删除了或写错了"; return 1 ;;
+        410) rm -f "$tmp"; print_error "链接已失效 (410): 限次已用尽 / 已过期 / 已被禁用"; return 1 ;;
+        503) rm -f "$tmp"; print_error "服务端暂不可用 (503): amneziawg 服务未运行, 稍后再试"; return 1 ;;
+        *)   rm -f "$tmp"; print_error "拉取失败: HTTP $code"; return 1 ;;
+    esac
+
+    # 内容校验: 必须是像样的 AmneziaWG 配置, 否则不覆盖已有配置
+    if ! grep -q '^\[Interface\]' "$tmp" 2>/dev/null || ! grep -qiE '^\s*PrivateKey\s*=' "$tmp"; then
+        rm -f "$tmp"
+        print_error "取回的内容不是有效的 AmneziaWG 配置, 现有配置未被覆盖"
+        return 1
+    fi
+
+    # AWG 混淆参数必须与服务端一致, 缺了就拒收 —— 缺参数能连上但握手永远失败
+    local miss=""
+    for k in Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4; do
+        grep -qiE "^\s*$k\s*=" "$tmp" || miss="$miss $k"
+    done
+    if [[ -n "$miss" ]]; then
+        rm -f "$tmp"
+        print_error "配置缺少 AWG 混淆参数:$miss"
+        print_info "客户端必须与服务端逐项一致, 否则握手不成功"
+        return 1
+    fi
+
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$C_CONF"
+
+    # 顺手留一份节点名, 方便状态栏显示
+    local nm="${2:-}"
+    [[ -n "$nm" ]] && echo "$nm" > "$C_CLIENT_DIR/.node-name"
+
+    print_ok "已拉取配置 -> $C_CONF"
+    printf "  %-14s %s\n" "本机地址"   "$(cget Address)"
+    printf "  %-14s %s\n" "服务端"     "$(cget Endpoint)"
+    printf "  %-14s %s\n" "混淆"       "Jc=$(cget Jc) S2=$(cget S2)"
+    return 0
+}
+
 client_menu() {
     while true; do
         client_banner
@@ -305,7 +364,8 @@ client_menu() {
         echo -e "${CYAN}5)${RESET} 停止 LAN 代理"
         echo -e "${CYAN}6)${RESET} 允许 LAN 访问 (0.0.0.0)"
         echo -e "${CYAN}7)${RESET} 查看连通性自检"
-        echo -e "${CYAN}8)${RESET} 卸载面板"
+        echo -e "${CYAN}8)${RESET} 从服务端拉取配置"
+        echo -e "${CYAN}9)${RESET} 卸载面板"
         echo -e "${CYAN}0)${RESET} 返回"
         read -r -p "请选择: " c || return 0
         case "$c" in
@@ -316,7 +376,8 @@ client_menu() {
             5) proxy_stop ;;
             6) proxy_lan ;;
             7) net_alive && print_ok "网络正常" || print_error "网络异常" ;;
-            8) bash "$CLIENT_DIR/../conf/uninstall.sh" && exit 0 ;;
+            8) client_pull "$(safe_read "下发链接" "")" ;;
+            9) bash "$CLIENT_DIR/../conf/uninstall.sh" && exit 0 ;;
             0) return ;;
             *) echo -e "${RED}无效选项 $c${RESET}" ;;
         esac
@@ -331,6 +392,7 @@ case "${1:-menu}" in
     proxy) proxy_start ;;
     proxy-stop) proxy_stop ;;
     status) conn_status ;;
-    menu) client_menu ;;
-    *) echo "用法: $0 {menu|connect|disconnect|proxy|proxy-stop|status}"; exit 2 ;;
+    pull)  shift; client_pull "$@" ;;
+    menu)  client_menu ;;
+    *) echo "用法: $0 {menu|pull <链接>|connect|disconnect|proxy|proxy-stop|status}"; exit 2 ;;
 esac
