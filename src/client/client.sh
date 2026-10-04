@@ -305,6 +305,7 @@ client_menu() {
         echo -e "${CYAN}5)${RESET} 停止 LAN 代理"
         echo -e "${CYAN}6)${RESET} 允许 LAN 访问 (0.0.0.0)"
         echo -e "${CYAN}7)${RESET} 查看连通性自检"
+        echo -e "${CYAN}8)${RESET} 卸载面板"
         echo -e "${CYAN}0)${RESET} 返回"
         read -r -p "请选择: " c || return 0
         case "$c" in
@@ -315,6 +316,7 @@ client_menu() {
             5) proxy_stop ;;
             6) proxy_lan ;;
             7) net_alive && print_ok "网络正常" || print_error "网络异常" ;;
+            8) bash "$CLIENT_DIR/../conf/uninstall.sh" && exit 0 ;;
             0) return ;;
             *) echo -e "${RED}无效选项 $c${RESET}" ;;
         esac
