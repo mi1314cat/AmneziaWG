@@ -63,6 +63,16 @@ bash src/conf/service.sh install|start|stop|restart|reload|status|logs [n]
 | `<name>.mihomo.yaml` | mihomo `proxies` 片段（已在 v1.19.30 上 `mihomo -t` 校验通过） |
 | `<name>.png` | 二维码，内容为 `.conf` 全文 |
 
+## 端口回避
+
+本机服务多时端口冲突是常态，所以面板**不写死端口**：
+
+- 客户端 LAN 代理优先用 `AWG_PROXY_PORT` → 上次记住的 (`state/proxy.port`)，
+  两者都没有才从 20000-60000 里挑一个空闲的；选中的端口会落盘，
+  下次启动不变，不会天天跳
+- 端口被别人占住时自动换一个空闲的，并打印占用方，不会直接失败
+- 服务端 `server.sh init` 的监听端口同样默认取空闲端口
+
 ## 配置下发（服务端 → 客户端）
 
 客户端原本只能手动把 `.conf` 放过去。现在服务端可生成一次性下发链接，

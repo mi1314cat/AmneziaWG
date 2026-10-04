@@ -37,8 +37,30 @@ C_RULE_PRIO="${AWG_RULE_PRIO:-100}"
 C_CONF="$C_CLIENT_DIR/client.conf"
 C_PROXY_PY="$CLIENT_DIR/proxy.py"
 
-C_PROXY_PORT="${AWG_PROXY_PORT:-7891}"
+C_PORT_FILE="$C_ROOT/state/proxy.port"
+# 端口不再写死 7891。本机上服务多 (mihomo/xray/… 都占着), 冲突是常态。
+# 优先级: 环境变量 > 上次记住的 > 自动挑一个空闲的, 并把结果落盘,
+# 保证下次启动端口不变, 免得客户端配置天天变。
+C_PROXY_PORT=""
 C_PROXY_HOST="127.0.0.1"
+proxy_port_load() {
+    C_PROXY_PORT="${AWG_PROXY_PORT:-}"
+    [[ -z "$C_PROXY_PORT" && -f "$C_PORT_FILE" ]] && C_PROXY_PORT=$(head -1 "$C_PORT_FILE" 2>/dev/null | tr -d '[:space:]')
+    [[ -z "$C_PROXY_PORT" ]] && C_PROXY_PORT=7891
+}
+proxy_port_save() { mkdir -p "$(dirname "$C_PORT_FILE")"; echo "$1" > "$C_PORT_FILE"; }
+
+# 端口被别的服务占了就换一个空闲的, 而不是直接报错让用户自己想办法
+proxy_port_ensure() {
+    if port_state "$C_PROXY_PORT"; then return 0; fi
+    local old="$C_PROXY_PORT" new
+    new=$(random_free_port 20000 60000 both) || { print_error "20000-60000 没有空闲端口"; return 1; }
+    print_warn "端口 $old 已被占用 ($(port_desc))"
+    print_info "占用方: ${PORT_WHO:-未知}"
+    print_info "自动改用空闲端口: $new"
+    C_PROXY_PORT="$new"
+    proxy_port_save "$new"
+}
 C_PROXY_ENABLED=false
 C_PROXY_SRC=""                           # 空 = 直连; 填隧道 IP = 走隧道
 
@@ -206,12 +228,8 @@ EOF
 proxy_start() {
     # port_state 返回 0 == "端口空闲"。所以"被占用"是取反, 不能写成
     # `port_state X && 报错` —— 那会在端口空闲时报错(实测 7891 空闲却报"已被占用")。
-    if ! port_state "$C_PROXY_PORT"; then
-        print_error "端口 $C_PROXY_PORT 已被占用: $(port_desc)"
-        print_info "占用方: ${PORT_WHO:-未知}"
-        print_info "可换端口后重试, 或用 client.sh 菜单 5) 重新设置"
-        return 1
-    fi
+    proxy_port_load
+    proxy_port_ensure || return 1
     C_PROXY_SRC=$(c_srv_ip)
     proxy_service_file
     systemctl daemon-reload
@@ -238,6 +256,7 @@ proxy_stop() {
 proxy_lan() {   # allow-lan: 监听所有网卡
     local p; p=$(safe_read_port "$C_PROXY_PORT" "both")
     C_PROXY_PORT="$p"
+    proxy_port_save "$p"
     C_PROXY_HOST="0.0.0.0"
     if have ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow "$p/tcp" >/dev/null 2>&1
@@ -253,17 +272,30 @@ proxy_lan() {   # allow-lan: 监听所有网卡
 # ==============================================================
 # 客户端与服务端的本质区别: 客户端没有服务端配置/节点, 它消费的是别人给的 client.conf
 conn_status() {
-    local up="已断开"
+    local up="未连接" st
     [[ -S "/var/run/amneziawg/$C_IFACE.sock" ]] && up="已连接"
-    echo -e "${CYAN}隧道:${RESET}   $up"
+    [[ "$up" == "已连接" ]] && up="${GREEN}已连接${RESET}" || up="${YELLOW}未连接${RESET}"
+
+    st=$(systemctl is-active "${C_UNIT}-proxy" 2>/dev/null || echo inactive)
+    [[ "$st" == "active" ]] && st="${GREEN}运行中${RESET}" || st="${YELLOW}已停止${RESET}"
+
+    # 标签列宽统一按显示宽度算 (汉字占 2 列), 否则中英混排必然对不齐
+    row "隧道"     10 "$up"
     if [[ -f "$C_CONF" ]]; then
-        echo -e "${CYAN}本机地址:${RESET} $(c_srv_ip)"
-        echo -e "${CYAN}服务端:${RESET}   $(c_endpoint):$(c_ep_port)"
+        row "本机地址" 10 "$(c_srv_ip)"
+        row "服务端"   10 "$(c_endpoint):$(c_ep_port)"
     fi
-    echo -e "${CYAN}代理:${RESET}   $(systemctl is-active "${C_UNIT}-proxy" 2>/dev/null || echo 未运行) ${C_PROXY_HOST}:${C_PROXY_PORT}"
-    echo -e "${CYAN}策略路由:${RESET}"
-    ip rule show 2>/dev/null | grep "lookup $C_TABLE" | sed 's/^/  /' || echo "  (未安装)"
+    proxy_port_load
+    row "代理"     10 "$st  ${C_PROXY_HOST}:${C_PROXY_PORT}"
+    local rules
+    rules=$(ip rule show 2>/dev/null | grep "lookup $C_TABLE")
+    if [[ -n "$rules" ]]; then
+        printf "  %-10s  %s\n" "策略路由" "$(echo "$rules" | head -1 | sed 's/^[0-9]*:[[:space:]]*//')" >&2
+    fi
 }
+
+# 任何要起服务的动作之前, 都先把端口落实
+ensure_port() { proxy_port_load; proxy_port_ensure; }
 
 connect_flow() {
     print_title "建立隧道"
@@ -290,7 +322,6 @@ core_ensure() {
 # 到底装的是服务端还是客户端面板 (两端的 conf/node.sh 之类的模块同名)。
 client_banner() {
     echo -e "${GREEN}AWG-Panel — AmneziaWG 管理脚本${RESET}   ${GREEN}[ 客户端 · CLIENT ]${RESET}" >&2
-    echo "----------------------" >&2
 }
 
 # ---------- 从服务端拉取配置 ----------

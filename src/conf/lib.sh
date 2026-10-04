@@ -72,6 +72,29 @@ print_title() {
     printf "${RESET}" >&2
 }
 
+# ---------- 显示宽度对齐 ----------
+# printf "%-14s" 是按**字符个数**补的, 而终端里一个汉字占 2 列。
+# 于是 "隧道" 补 12 格、"本机地址" 补 8 格, 两者显示宽度差 4 列, 列对不齐 ——
+# 中英混排的表格看着总是"歪"的, 根因就在这。
+# dwidth 用显示宽度, pad 才能真正对齐。
+dwidth() {   # 字符串的终端显示列数
+    # bash 的 [[ =~ ]] 匹配不了多字节区间 ([一-龥] 在 UTF-8 下永远不匹配),
+    # 所以走 awk: length() 给字符数, 再把非 ASCII 字符各多算 1 列。
+    # 实践中 CJK 与全角标点都是 3 字节 UTF-8, 占 2 列; 拉丁/西里尔是 2 字节, 占 1 列。
+    printf '%s' "$1" | LC_ALL=C.UTF-8 awk '
+    { s=$0; w=length(s)
+      tmp=s; gsub(/[\001-\177]/,"",tmp)
+      print w + length(tmp) }'
+}
+pad() {      # $1=字符串 $2=目标显示宽度
+    local s="$1" want="$2" w
+    w=$(dwidth "$s")
+    printf "%s%*s" "$s" $(( want > w ? want - w : 0 )) "" >&2
+}
+row() {      # $1=标签 $2=标签宽 $3=值
+    printf "  " >&2; pad "$1" "$2"; printf "  %s\n" "$3" >&2
+}
+
 # ---------- 通用 ----------
 have()      { command -v "$1" >/dev/null 2>&1; }
 have_svc()  { [[ -d /run/systemd/system ]]; }

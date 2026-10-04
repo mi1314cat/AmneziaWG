@@ -259,7 +259,7 @@ case "$MODE" in
         exec bash "$PANEL" service status
         ;;
     server|client)
-        detect_role; local prev_role="$ROLE"
+        detect_role
         save_role "$MODE"                     # 先记下来, 后面任何一步失败都不至于失忆
         deps_check
         awg_proxy_pick          # apply 必须在 fetch 之前, 否则下载就已经超时了
