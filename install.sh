@@ -7,10 +7,15 @@
 #       (所有交互都在面板里, 本脚本只做"取码 + 装依赖 + 交接")
 #
 # 可选参数:
-#   install.sh server   安装为服务端 (默认)
-#   install.sh client   安装为客户端
-#   install.sh update   拉取最新代码
-#   install.sh status   只看状态
+#   install.sh                沿用上次安装的角色进入面板 (推荐)
+#   install.sh server         安装为服务端
+#   install.sh client         安装为客户端
+#   install.sh role           查看当前角色 (role server|client 可切换)
+#   install.sh update         拉取最新代码后进入原角色面板
+#   install.sh status         只看状态
+#
+# 服务端与客户端是**两套分开的面板**, 装在同一目录下, 一台机器只能选一个。
+# 首次安装时选定的角色会记在 state/role, 之后裸跑这条命令总是进同一个面板。
 # ==============================================================
 set -u
 
@@ -26,9 +31,34 @@ die(){  err "$*"; printf "${RED}请根据上面的原因检查后重试。安装
 
 [ "$(id -u)" = "0" ] || { err "请使用 root 运行"; exit 1; }
 
-MODE="${1:-server}"
 PROJECT_DIR="$SRV_ROOT/amneziawg"
 PANEL="$PROJECT_DIR/src/awg.sh"
+ROLE_FILE="$PROJECT_DIR/state/role"
+
+# 这两个角色是**分开的两套面板**, 装在同一个目录下, 但只能选一个。
+# 安装时选的哪个角色必须记下来 —— 否则下次再敲同一条命令会进错面板,
+# 用户根本不知道自己在哪台机器上装的什么。
+ROLE=""
+detect_role() {
+    local rf="$PROJECT_DIR/state/role"
+    [[ -f "$rf" ]] && { ROLE=$(head -1 "$rf" 2>/dev/null | tr -d '[:space:]'); return 0; }
+    # 没有标记的旧安装: 按实际留下的配置反推
+    if   [[ -f "$PROJECT_DIR/server/server.conf" ]]; then ROLE="server"
+    elif [[ -f "$PROJECT_DIR/client/client.conf"  || -d "$PROJECT_DIR/keys" ]]; then ROLE="client"
+    else ROLE="server"; fi
+}
+save_role() { mkdir -p "$PROJECT_DIR/state"; echo "$1" > "$ROLE_FILE"; }
+panel_for() { [[ "$1" == "client" ]] \
+                && echo "$PROJECT_DIR/src/client/client.sh" \
+                || echo "$PANEL"; }
+
+# 裸跑 (无参数) 时, 沿用上次装的角色
+if [[ $# -eq 0 ]]; then
+    if [[ -d "$PROJECT_DIR" ]]; then detect_role; else ROLE="server"; fi
+    MODE="$ROLE"
+else
+    MODE="${1:-server}"
+fi
 
 # ---------- 依赖 ----------
 deps_check() {
@@ -157,17 +187,36 @@ awg_proxy_persist() {
 
 fetch_project() {
     local url="$PROJECT_DIR"
+    # 注意: keys/ clients/ client/ server/ share/ logs/ bin/ 全部落在
+    # $url 这一棵树下面。**任何 rm -rf "$url" 都会连用户的密钥和配置一起删掉。**
+    # 之前 git pull 失败就 rm -rf, 已经实测造成过一次配置全丢。
     if [[ -d "$url/.git" ]]; then
         info "更新已有项目..."
-        git -C "$url" pull --ff-only >/dev/null 2>&1 || {
-            warn "git pull 失败, 尝试重新拉取"
-            rm -rf "$url"
-        }
+        if ! git -C "$url" pull --ff-only >/dev/null 2>&1; then
+            # 头号原因是工作区有本地改动 (含直接 scp 进树的补丁), 丢弃即可
+            warn "git pull 失败, 尝试丢弃本地改动后重试"
+            git -C "$url" checkout -- . >/dev/null 2>&1
+            git -C "$url" clean -fdq -- src install.sh >/dev/null 2>&1
+            if ! git -C "$url" pull --ff-only >/dev/null 2>&1; then
+                warn "git pull 仍失败, 只覆盖源码文件 (配置与密钥原样保留)"
+                local tmp; tmp=$(mktemp -d)
+                if git clone -q --depth 1 --branch "$BRANCH" "$REPO" "$tmp" 2>/dev/null; then
+                    # 只换代码, 绝不碰数据目录
+                    rm -rf "$url/src"
+                    cp -a "$tmp/src" "$url/src"
+                    [[ -f "$tmp/install.sh" ]] && cp -a "$tmp/install.sh" "$url/install.sh"
+                    [[ -f "$tmp/README.md" ]] && cp -a "$tmp/README.md" "$url/README.md"
+                else
+                    rm -rf "$tmp"
+                    die "更新失败, 且无法下载新代码。请检查网络后重试 (现有配置未改动)"
+                fi
+            fi
+        fi
     fi
     if [[ ! -f "$PANEL" ]]; then
         info "下载 AWG-Panel..."
         mkdir -p "$SRV_ROOT"
-        rm -rf "$url"
+        [[ -e "$url" && ! -d "$url" ]] && rm -f "$url"
         # 两条路: git clone (可复用, 后续能增量更新) 优先, 失败再退回 tarball
         if git clone -q --depth 1 --branch "$BRANCH" \
              "https://github.com/mi1314cat/AmneziaWG.git" "$url" 2>/dev/null; then
@@ -186,32 +235,48 @@ fetch_project() {
 
 case "$MODE" in
     update)
+        detect_role
         fetch_project
-        ok "已更新, 重新进入面板"
-        exec bash "$PANEL"
+        ok "已更新, 重新进入$([[ $ROLE == client ]] && echo 客户端 || echo 服务端)面板"
+        exec bash "$(panel_for "$ROLE")"
+        ;;
+    role)
+        [[ -d "$PROJECT_DIR" ]] || die "尚未安装"
+        detect_role
+        if [[ -n "${2:-}" ]]; then
+            [[ "$2" == "server" || "$2" == "client" ]] || die "用法: install.sh role {server|client}"
+            save_role "$2"
+            ok "已切换为 $([[ $2 == client ]] && echo 客户端 || echo 服务端)"
+        fi
+        printf "\n  当前角色: "
+        if   [[ "$ROLE" == "client" ]]; then printf "${GREEN}客户端 · CLIENT${PLAIN}  (面板: $PROJECT_DIR/src/client/client.sh)\n"
+        else printf "${GREEN}服务端 · SERVER${PLAIN}  (面板: $PANEL)\n"; fi
+        printf "  切换: install.sh role {server|client}\n\n"
+        exit 0
         ;;
     status)
         [[ -f "$PANEL" ]] || die "尚未安装"
         exec bash "$PANEL" service status
         ;;
     server|client)
+        detect_role; local prev_role="$ROLE"
+        save_role "$MODE"                     # 先记下来, 后面任何一步失败都不至于失忆
         deps_check
         awg_proxy_pick          # apply 必须在 fetch 之前, 否则下载就已经超时了
         fetch_project
-        awg_proxy_persist       # 落盘必须在 fetch 之后, 它会 rm -rf 整个项目目录
+        awg_proxy_persist       # 落盘必须在 fetch 之后, 避免被更新过程冲掉
         if [[ "$MODE" == "client" ]]; then
-            if [[ -f "$PROJECT_DIR/src/client/client.sh" ]]; then
-                # 客户端同样需要 amneziawg-go, 官方 release 只有源码, 必须编译
-                if [[ ! -x "$PROJECT_DIR/bin/amneziawg-go" ]]; then
-                    info "客户端需要 amneziawg-go 内核 (官方 release 仅源码包, 将本地编译)"
-                    bash "$PROJECT_DIR/src/conf/core.sh" install || die "内核安装失败"
-                fi
-                ok "以客户端模式启动"
-                exec bash "$PROJECT_DIR/src/client/client.sh" menu
+            [[ -f "$PROJECT_DIR/src/client/client.sh" ]] \
+                || die "客户端面板不存在: $PROJECT_DIR/src/client/client.sh"
+            # 客户端同样需要 amneziawg-go, 官方 release 只有源码, 必须编译
+            if [[ ! -x "$PROJECT_DIR/bin/amneziawg-go" ]]; then
+                info "客户端需要 amneziawg-go 内核 (官方 release 仅源码包, 将本地编译)"
+                bash "$PROJECT_DIR/src/conf/core.sh" install || die "内核安装失败"
             fi
-            warn "客户端面板不存在, 本次按服务端启动"
+            ok "以客户端模式启动"
+            exec bash "$PROJECT_DIR/src/client/client.sh" menu
         fi
-        ok "安装完成, 进入面板"
+        ok "安装完成, 进入服务端面板"
         exec bash "$PANEL"
         ;;
     *)
