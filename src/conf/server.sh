@@ -97,6 +97,25 @@ server_toggle_nat() {
 server_init() {
     print_title "创建 AmneziaWG 服务端配置"
 
+    # 重跑初始化会把 server.conf 整个重写, [Peer] 段随之消失 —— 但
+    # keys/ 与 clients/ 是默认保留的, 于是留下一批客户端产物,
+    # 里面的私钥服务端已经不认了, 握手永远不通, 却没有任何报错。
+    # 这种情况必须在动手之前拦下来。
+    if [[ -f "$AWG_SERVER_CONF" ]]; then
+        local peers=0
+        peers=$(grep -c '^\[Peer\]' "$AWG_SERVER_CONF" 2>/dev/null || echo 0)
+        if (( peers > 0 )); then
+            print_error "已存在 $peers 个节点, 重新初始化会让服务端不再认这些节点的公钥"
+            print_info "现有客户端配置将全部失效。如确需重建, 请先:"
+            print_info "  node.sh 删除所有节点, 或手动备份后重跑"
+            yes_no "仍然重新初始化 (现有节点将全部失效)" n || return 1
+        elif [[ -d "$AWG_KEYS_DIR" ]] && [[ -n "$(ls -A "$AWG_KEYS_DIR" 2>/dev/null)" ]]; then
+            print_warn "keys/ 里还有节点密钥, 但 server.conf 里没有对应 Peer"
+            print_info "这通常是上次初始化中断或卸载保留了数据目录造成的"
+            yes_no "重新初始化 (会按现有 keys 重新生成节点)" y || return 1
+        fi
+    fi
+
     local addr port priv pub hs
     addr=$(safe_read "服务端地址 (IP/掩码)" "$AWG_DEFAULT_SUBNET")
     [[ "$addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] ||

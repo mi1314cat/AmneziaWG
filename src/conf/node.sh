@@ -190,12 +190,13 @@ node_names() {
     done
 }
 
-node_add() {
+node_add() {   # $1=节点名(可选, 省略则交互询问)
     print_title "创建客户端节点"
     [[ -f "$AWG_SERVER_CONF" ]] || { print_error "服务端未初始化, 先执行 server.sh init"; return 1; }
 
     local name cip priv pub
-    name=$(safe_read "节点名称" "$(next_client_name)")
+    name="${1:-}"
+    [[ -z "$name" ]] && name=$(safe_read "节点名称" "$(next_client_name)")
     [[ -d "$AWG_KEYS_DIR/$name" ]] && { print_error "节点 $name 已存在"; return 1; }
 
     cip=$(alloc_ip) || { print_error "地址池已满"; return 1; }
@@ -259,13 +260,16 @@ node_show() {
     cat "$AWG_CLIENTS_DIR/$name.conf"
 }
 
-node_del() {
+node_del() {   # $1=节点名(可选, 省略则交互询问)
     print_title "删除客户端节点"
     node_list
-    local name; name=$(safe_read "要删除的节点名" "")
+    local name="${1:-}"
+    [[ -z "$name" ]] && name=$(safe_read "要删除的节点名" "")
     [[ -z "$name" ]] && { print_info "已取消"; return 0; }
     [[ -d "$AWG_KEYS_DIR/$name" ]] || { print_error "无此节点: $name"; return 1; }
-    yes_no "确认删除 $name (含密钥与全部产物)" n || { print_info "已取消"; return 0; }
+    if [[ -z "${1:-}" ]]; then
+        yes_no "确认删除 $name (含密钥与全部产物)" n || { print_info "已取消"; return 0; }
+    fi
 
     local pub; pub=$(cat "$AWG_KEYS_DIR/$name/pub.key" 2>/dev/null)
     # 从 server.conf 移除该 peer 段
@@ -331,11 +335,13 @@ node_menu() {
 }
 
 case "${1:-menu}" in
-    add)   node_add ;;
+    # 用 shift + "$@" 把后续参数透传给函数。直接写 node_add / node_del 会把
+    # $2 丢掉, 于是 `node.sh del cc-clean` 静默退化成"读 stdin"然后取消。
+    add)   shift; node_add  "$@" ;;
     list)  node_list ;;
-    show)  node_show "${2:-}" ;;
-    del)   node_del ;;
+    show)  shift; node_show "$@" ;;
+    del)   shift; node_del  "$@" ;;
     regen) node_regen ;;
     menu)  node_menu ;;
-    *) echo "用法: $0 {add|list|show <name>|del|regen|menu}"; exit 2 ;;
+    *) echo "用法: $0 {add [名称]|list|show <名称>|del [名称]|regen|menu}"; exit 2 ;;
 esac
