@@ -251,6 +251,7 @@ proxy_lan() {   # allow-lan: 监听所有网卡
 # ==============================================================
 # 菜单
 # ==============================================================
+# 客户端与服务端的本质区别: 客户端没有服务端配置/节点, 它消费的是别人给的 client.conf
 conn_status() {
     local up="已断开"
     [[ -S "/var/run/amneziawg/$C_IFACE.sock" ]] && up="已连接"
@@ -285,9 +286,16 @@ core_ensure() {
     bash "$CLIENT_DIR/../conf/core.sh" install
 }
 
+# 角色标识: 与服务端标题栏保持一致的写法, 避免在 CC 上分不清
+# 到底装的是服务端还是客户端面板 (两端的 conf/node.sh 之类的模块同名)。
+client_banner() {
+    echo -e "${GREEN}AWG-Panel — AmneziaWG 管理脚本${RESET}   ${GREEN}[ 客户端 · CLIENT ]${RESET}" >&2
+    echo "----------------------" >&2
+}
+
 client_menu() {
     while true; do
-        print_title "AWG-Panel 客户端"
+        client_banner
         conn_status
         echo
         echo -e "${CYAN}1)${RESET} 安装 / 检查内核"
